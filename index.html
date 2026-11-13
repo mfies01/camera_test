@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Shelf camera test</title>
+<style>
+  :root { color-scheme: dark; --bg:#111; --fg:#eee; --muted:#999; --card:#1d1d1d; --accent:#4da3ff; --ok:#3c3; --warn:#fc3; --bad:#f55; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif;
+         padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px); }
+  h1 { font-size:18px; margin:12px 0 4px; }
+  h2 { font-size:15px; margin:18px 0 6px; }
+  p.note { color:var(--muted); margin:4px 0 10px; }
+  button, select { font:inherit; padding:10px 12px; border-radius:8px; border:1px solid #444; background:#2a2a2a; color:var(--fg); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#000; font-weight:600; }
+  button:disabled { opacity:.4; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0; }
+  #stage { position:relative; width:100%; background:#000; border-radius:8px; overflow:hidden; }
+  #stage video { display:block; width:100%; height:auto; }
+  #overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  #hud { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:6px 8px; border-radius:6px; font:12px/1.35 ui-monospace, monospace; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  .card { background:var(--card); border-radius:8px; padding:10px; margin:8px 0; }
+  .card img { width:100%; height:auto; border-radius:6px; display:block; margin-top:6px; }
+  pre { white-space:pre-wrap; word-break:break-word; font:12px/1.35 ui-monospace, monospace; margin:0; }
+  label.ctl { display:flex; gap:8px; align-items:center; width:100%; }
+  label.ctl span { min-width:150px; }
+  label.ctl input[type=range] { flex:1; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>Shelf camera test</h1>
+<p class="note">Tests what a web page gets from this phone's camera: stream resolution, a full photo via
+<code>takePhoto()</code>, camera controls, and the phone's own camera app for comparison. Nothing is uploaded;
+all images stay on this phone.</p>
+
+<div class="row">
+  <button id="start" class="primary">Start camera</button>
+  <select id="res" title="Requested stream resolution">
+    <option value="3840x2160">ask for 4K</option>
+    <option value="1920x1080">ask for 1080p</option>
+    <option value="4096x3072">ask for 4:3 max</option>
+  </select>
+  <select id="cams" title="Camera" disabled><option>rear camera (default)</option></select>
+</div>
+
+<div id="stage" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div id="hud"></div>
+</div>
+
+<div class="row">
+  <button id="grab" disabled>Grab video frame</button>
+  <button id="photo" disabled>takePhoto()</button>
+  <button id="native">Phone's camera app</button>
+  <input id="file" type="file" accept="image/*" capture="environment" hidden>
+</div>
+<p class="note">"Phone's camera app" stops the live stream first (some phones can't share the camera); tap
+"Start camera" again afterwards.</p>
+
+<div id="controls"></div>
+
+<h2>Captures</h2>
+<div id="shots"><p class="note">None yet.</p></div>
+
+<h2>Report</h2>
+<div class="row"><button id="copy">Copy report</button><span id="copied" class="note"></span></div>
+<div class="card"><pre id="report">Start the camera first.</pre></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const video = $("video"), overlay = $("overlay"), hud = $("hud");
+const report = { userAgent: navigator.userAgent, screen: `${screen.width}x${screen.height} @${devicePixelRatio}`,
+                 imageCaptureApi: "ImageCapture" in window, captures: [] };
+let stream = null, track = null, imageCapture = null, tilt = null, checkTimer = null;
+
+function renderReport() { $("report").textContent = JSON.stringify(report, null, 2); }
+function mb(bytes) { return (bytes / 1048576).toFixed(2) + " MB"; }
+function mp(w, h) { return (w * h / 1e6).toFixed(1) + " MP"; }
+
+// ---------- start / stop ----------
+async function startCamera() {
+  stopCamera();
+  // iOS needs this from a tap before orientation events arrive.
+  if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) {
+    try { report.orientationPermission = await DeviceOrientationEvent.requestPermission(); }
+    catch (e) { report.orientationPermission = "error: " + e.message; }
+  }
+  const [w, h] = $("res").value.split("x").map(Number);
+  const camId = $("cams").value;
+  const video_c = { width: { ideal: w }, height: { ideal: h } };
+  if (camId && camId !== "rear camera (default)") video_c.deviceId = { exact: camId };
+  else video_c.facingMode = { ideal: "environment" };
+  report.requested = { width: w, height: h, camera: video_c.deviceId ? "deviceId" : "facingMode environment" };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
+  } catch (e) {
+    report.error = `getUserMedia: ${e.name}: ${e.message}`; renderReport(); alertBox(report.error); return;
+  }
+  track = stream.getVideoTracks()[0];
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  await new Promise(r => video.videoWidth ? r() : video.addEventListener("loadedmetadata", r, { once: true }));
+  $("stage").hidden = false;
+  report.error = undefined;
+  report.trackLabel = track.label;
+  report.streamSettings = track.getSettings ? track.getSettings() : null;
+  report.streamVideoSize = `${video.videoWidth}x${video.videoHeight} (${mp(video.videoWidth, video.videoHeight)})`;
+  report.trackCapabilities = track.getCapabilities ? track.getCapabilities() : "getCapabilities not supported";
+  imageCapture = null; report.photoCapabilities = null;
+  if ("ImageCapture" in window) {
+    try {
+      imageCapture = new ImageCapture(track);
+      const pc = await imageCapture.getPhotoCapabilities();
+      report.photoCapabilities = { imageWidth: pc.imageWidth && { ...rangeOf(pc.imageWidth) },
+        imageHeight: pc.imageHeight && { ...rangeOf(pc.imageHeight) },
+        fillLightMode: pc.fillLightMode, redEyeReduction: pc.redEyeReduction };
+    } catch (e) { report.photoCapabilities = "error: " + e.message; }
+  }
+  $("grab").disabled = false;
+  $("photo").disabled = !imageCapture;
+  await listCameras();
+  buildControls();
+  renderReport();
+  checkTimer = setInterval(runChecks, 200);
+}
+function rangeOf(r) { return { min: r.min, max: r.max, step: r.step }; }
+
+function stopCamera() {
+  clearInterval(checkTimer);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = track = imageCapture = null;
+  $("grab").disabled = $("photo").disabled = true;
+}
+
+async function listCameras() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+  report.cameras = devices.map(d => d.label || "(no label)");
+  const sel = $("cams"), current = track && track.getSettings ? track.getSettings().deviceId : "";
+  sel.innerHTML = '<option>rear camera (default)</option>' +
+    devices.map(d => `<option value="${d.deviceId}">${d.label || d.deviceId.slice(0, 8)}</option>`).join("");
+  if (current && sel.value === "rear camera (default)") {
+    // show which device the default picked, without switching to "exact" mode
+    [...sel.options].forEach(o => { if (o.value === current) o.textContent += "  ← in use"; });
+  }
+  sel.disabled = false;
+}
+
+// ---------- camera controls (Android exposes these, iOS mostly not) ----------
+function buildControls() {
+  const box = $("controls"); box.innerHTML = "";
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const set = track.getSettings ? track.getSettings() : {};
+  const ranges = ["zoom", "focusDistance", "exposureCompensation", "exposureTime", "colorTemperature", "iso"];
+  const modes = ["focusMode", "exposureMode", "whiteBalanceMode"];
+  const items = [];
+  for (const k of modes) if (Array.isArray(caps[k]) && caps[k].length) {
+    const s = document.createElement("select");
+    s.innerHTML = caps[k].map(v => `<option ${v === set[k] ? "selected" : ""}>${v}</option>`).join("");
+    s.onchange = () => apply(k, s.value);
+    items.push(label(k, s));
+  }
+  for (const k of ranges) if (caps[k] && typeof caps[k].max === "number") {
+    const r = document.createElement("input"); r.type = "range";
+    Object.assign(r, { min: caps[k].min, max: caps[k].max, step: caps[k].step || "any", value: set[k] ?? caps[k].min });
+    const out = document.createElement("span"); out.textContent = r.value; out.style.minWidth = "60px";
+    r.oninput = () => { out.textContent = r.value; apply(k, Number(r.value)); };
+    const l = label(k, r); l.append(out); items.push(l);
+  }
+  if (caps.torch) {
+    const b = document.createElement("button"); let on = false; b.textContent = "Torch off";
+    b.onclick = () => { on = !on; b.textContent = on ? "Torch on" : "Torch off"; apply("torch", on); };
+    items.push(label("torch", b));
+  }
+  if (!items.length) { box.innerHTML = '<p class="note">This browser exposes no camera controls (expected on iPhone).</p>'; return; }
+  const h = document.createElement("h2"); h.textContent = "Camera controls"; box.append(h);
+  const card = document.createElement("div"); card.className = "card"; items.forEach(i => card.append(i)); box.append(card);
+}
+function label(name, el) { const l = document.createElement("label"); l.className = "ctl";
+  const s = document.createElement("span"); s.textContent = name; l.append(s, el); return l; }
+async function apply(k, v) {
+  try { await track.applyConstraints({ advanced: [{ [k]: v }] }); }
+  catch (e) { alertBox(`${k}: ${e.message}`); }
+}
+
+// ---------- live checks: what tier 3 guidance would compute ----------
+const small = document.createElement("canvas"), sctx = small.getContext("2d", { willReadFrequently: true });
+function runChecks() {
+  if (!video.videoWidth) return;
+  const t0 = performance.now();
+  const W = 320, H = Math.round(W * video.videoHeight / video.videoWidth);
+  small.width = W; small.height = H;
+  sctx.drawImage(video, 0, 0, W, H);
+  const d = sctx.getImageData(0, 0, W, H).data;
+  const g = new Float32Array(W * H); let clipped = 0, dark = 0;
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; g[j] = y;
+    if (y >= 250) clipped++; else if (y <= 15) dark++;
+  }
+  const sharp = laplacianVariance(g, W, H);
+  const ms = performance.now() - t0;
+  const n = W * H, clipPct = 100 * clipped / n, darkPct = 100 * dark / n;
+  const col = (v, okIf, warnIf) => okIf(v) ? "var(--ok)" : warnIf(v) ? "var(--warn)" : "var(--bad)";
+  let html =
+    `<span class="dot" style="background:${col(sharp, v => v > 100, v => v > 40)}"></span>sharpness ${sharp.toFixed(0)}<br>` +
+    `<span class="dot" style="background:${col(clipPct, v => v < 1, v => v < 5)}"></span>blown out ${clipPct.toFixed(1)} %<br>` +
+    `<span class="dot" style="background:${col(darkPct, v => v < 10, v => v < 30)}"></span>too dark ${darkPct.toFixed(1)} %<br>`;
+  if (tilt) html += `<span class="dot" style="background:${col(Math.abs(tilt.beta - 90), v => v < 8, v => v < 15)}"></span>` +
+                    `tilt fwd/back ${(tilt.beta - 90).toFixed(0)}°, sideways ${tilt.gamma.toFixed(0)}°<br>`;
+  html += `stream ${video.videoWidth}×${video.videoHeight}, checks ${ms.toFixed(1)} ms`;
+  hud.innerHTML = html;
+  drawGuide();
+}
+function laplacianVariance(g, W, H) {
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x, v = g[i - W] + g[i + W] + g[i - 1] + g[i + 1] - 4 * g[i];
+    sum += v; sum2 += v * v; n++;
+  }
+  const m = sum / n; return sum2 / n - m * m;
+}
+function drawGuide() {
+  const r = overlay.getBoundingClientRect();
+  if (overlay.width !== Math.round(r.width)) { overlay.width = Math.round(r.width); overlay.height = Math.round(r.height); }
+  const c = overlay.getContext("2d"), w = overlay.width, h = overlay.height;
+  c.clearRect(0, 0, w, h);
+  c.strokeStyle = "rgba(255,255,255,.55)"; c.lineWidth = 2; c.setLineDash([8, 6]);
+  c.strokeRect(w * .06, h * .04, w * .88, h * .92);          // "whole segment inside this frame"
+  c.setLineDash([]); c.strokeStyle = "rgba(255,255,255,.2)"; c.lineWidth = 1;
+  for (const f of [1 / 3, 2 / 3]) { c.beginPath(); c.moveTo(0, h * f); c.lineTo(w, h * f); c.stroke(); }
+}
+window.addEventListener("deviceorientation", e => { if (e.beta !== null) tilt = { beta: e.beta, gamma: e.gamma }; });
+
+// ---------- the three capture routes ----------
+async function grabFrame() {
+  const t0 = performance.now();
+  const c = document.createElement("canvas"); c.width = video.videoWidth; c.height = video.videoHeight;
+  c.getContext("2d").drawImage(video, 0, 0);
+  const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.92));
+  await addShot("Video frame (canvas, JPEG 0.92)", blob, performance.now() - t0);
+}
+async function takePhoto() {
+  const t0 = performance.now(); let blob, note = "";
+  try {
+    const pc = report.photoCapabilities;
+    const opts = pc && pc.imageWidth && pc.imageWidth.max ? { imageWidth: pc.imageWidth.max } : {};
+    try { blob = await imageCapture.takePhoto(opts); note = opts.imageWidth ? ` (asked imageWidth ${opts.imageWidth})` : ""; }
+    catch { blob = await imageCapture.takePhoto(); note = " (default settings)"; }
+  } catch (e) { alertBox("takePhoto: " + e.message); return; }
+  await addShot("takePhoto()" + note, blob, performance.now() - t0);
+  if (video.paused) video.play().catch(() => {});   // some phones pause the preview while shooting
+}
+async function nativeCamera() { stopCamera(); $("file").value = ""; $("file").click(); }
+$("file").onchange = async () => { const f = $("file").files[0]; if (f) await addShot("Phone's camera app", f, null); };
+
+async function addShot(source, blob, ms) {
+  let w = "?", h = "?";
+  try { const bmp = await createImageBitmap(blob); w = bmp.width; h = bmp.height; bmp.close(); } catch {}
+  const entry = { source, size: `${w}x${h}`, megapixels: typeof w === "number" ? +(w * h / 1e6).toFixed(1) : null,
+                  bytes: blob.size, type: blob.type, ms: ms == null ? null : Math.round(ms) };
+  report.captures.push(entry); renderReport();
+  const url = URL.createObjectURL(blob), shots = $("shots");
+  if (shots.querySelector("p.note")) shots.innerHTML = "";
+  const card = document.createElement("div"); card.className = "card";
+  card.innerHTML = `<b>${source}</b><br>${w} × ${h} px` + (entry.megapixels ? ` (${entry.megapixels} MP)` : "") +
+    `, ${mb(blob.size)}` + (entry.ms != null ? `, ${entry.ms} ms` : "") +
+    `<br><a href="${url}" target="_blank">open full size</a> · <a href="${url}" download="shot-${report.captures.length}.jpg">save</a>` +
+    `<img src="${url}" alt="">`;
+  shots.prepend(card);
+}
+
+// ---------- misc ----------
+function alertBox(msg) {
+  const d = document.createElement("div"); d.className = "card"; d.style.borderLeft = "4px solid var(--bad)";
+  d.textContent = msg; $("shots").before(d); setTimeout(() => d.remove(), 8000);
+}
+$("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("report").textContent); $("copied").textContent = "copied"; }
+  catch { const r = document.createRange(); r.selectNodeContents($("report"));
+          getSelection().removeAllRanges(); getSelection().addRange(r); $("copied").textContent = "selected, copy manually"; }
+};
+$("start").onclick = startCamera;
+$("cams").onchange = startCamera;
+$("res").onchange = () => { if (stream) startCamera(); };
+$("grab").onclick = grabFrame;
+$("photo").onclick = takePhoto;
+$("native").onclick = nativeCamera;
+if (!window.isSecureContext) alertBox("Not a secure context: the camera needs HTTPS (or localhost).");
+renderReport();
+</script>
+</body>
+</html>
