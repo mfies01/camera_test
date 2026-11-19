@@ -169,7 +169,7 @@ const A = window.ShelfAnalysis;
 // ---------- thresholds (to be tuned on real shelves) ----------
 const T = {
   sharpRatioBad: 0.45, sharpRatioWarn: 0.65,  // vs. the sharpest frame of the last 3 s
-  sharpAbsBad: 25,                            // Laplace variance on the 320 px frame
+  sharpAbsBad: 25,                            // Laplace variance on the analysis frame (set at 320 px; the relative check above carries most of the weight)
   motionBad: 9, motionWarn: 5,                // mean abs frame difference
   glareWarn: 2, glareBad: 6,                  // % clipped pixels
   darkWarn: 25, darkBad: 45,                  // % near-black pixels
@@ -255,12 +255,15 @@ function stop() {
 function fail(msg) { show("intro"); $("startError").textContent = msg; $("startError").hidden = false; }
 
 // ---------- live analysis ----------
-// How the camera frame is scaled down to 320 px (?scale=gpu|cpu|bitmap, default gpu):
+// How the camera frame is scaled down (?scale=gpu|cpu|bitmap, default bitmap; measured on an
+// Android phone with a 4K stream: bitmap 26 ms, gpu and cpu ~250 ms):
 //  gpu    - a normal canvas: the graphics chip scales, only the small image is read back
 //  cpu    - a willReadFrequently canvas: the whole frame is copied to main memory first (slow on Android)
 //  bitmap - createImageBitmap with resize, then a small CPU canvas
-const SCALE = ["gpu", "cpu", "bitmap"].includes(new URLSearchParams(location.search).get("scale"))
-  ? new URLSearchParams(location.search).get("scale") : "gpu";
+const Q = new URLSearchParams(location.search);
+const SCALE = ["gpu", "cpu", "bitmap"].includes(Q.get("scale")) ? Q.get("scale") : "bitmap";
+// Width of the analysis frame (?w=, default 240): tested on shelf photos, as accurate as 320.
+const AW = Math.max(120, Math.min(480, Number(Q.get("w")) || 240));
 const small = document.createElement("canvas"),
       sctx = small.getContext("2d", SCALE === "gpu" ? {} : { willReadFrequently: true });
 let analysing = false;
@@ -270,7 +273,7 @@ async function tick() {
   try { await tickInner(); } finally { analysing = false; }
 }
 async function tickInner() {
-  const W = 320, H = Math.round(W * video.videoHeight / video.videoWidth);
+  const W = AW, H = Math.round(W * video.videoHeight / video.videoWidth);
   if (small.width !== W || small.height !== H) { small.width = W; small.height = H; }
   const t0 = performance.now();
   if (SCALE === "bitmap") {
@@ -281,8 +284,9 @@ async function tickInner() {
   const t1 = performance.now();
   const rgba = sctx.getImageData(0, 0, W, H).data;          // read it back from the GPU
   const t2 = performance.now();
-  const gray = A.lumaFromRGBA(rgba, W * H);
-  const r = A.analyzeFrame(gray, W, H, prevGray);
+  const le = A.lumaAndExposure(rgba, W * H);
+  const gray = le.gray;
+  const r = A.analyzeFrame(gray, W, H, prevGray, le.exposure);
   const t3 = performance.now();
   r.ms = t3 - t0; r.W = W; r.H = H;
   r.times = { draw: t1 - t0, read: t2 - t1, analyze: t3 - t2, render: lastRenderMs };
@@ -380,7 +384,7 @@ function render(s, now) {
       `Takt: alle ${f(r.interval)} ms\n` +
       `  verkleinern ${f(r.times.draw)}  auslesen ${f(r.times.read)}\n` +
       `  Analyse ${f(r.times.analyze)}  Zeichnen ${f(r.times.render)} ms\n` +
-      `  davon Schärfe ${f(r.parts.sharp)}  Belichtung ${f(r.parts.exposure)}  Böden ${f(r.parts.lines)}\n` +
+      `  davon Schärfe ${f(r.parts.sharp)}  Bewegung ${f(r.parts.exposure)}  Böden ${f(r.parts.lines)}\n` +
       `Verkleinern per ${SCALE}, Stream angefordert ${RES[0]}×${RES[1]}\n` +
       `Schärfe ${r.sharpness.toFixed(0)} / max ${r.sharpRef.toFixed(0)}\n` +
       `Bewegung ${f(r.motion)}\n` +

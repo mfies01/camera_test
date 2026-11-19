@@ -20,6 +20,18 @@
     return g;
   }
 
+  // Grey frame and exposure statistics in one pass over the pixels (saves a loop on slow phones).
+  function lumaAndExposure(rgba, n) {
+    const g = new Float32Array(n);
+    let clipped = 0, dark = 0, s = 0;
+    for (let i = 0, j = 0; j < n; i += 4, j++) {
+      const y = 0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2];
+      g[j] = y; s += y;
+      if (y >= 250) clipped++; else if (y <= 15) dark++;
+    }
+    return { gray: g, exposure: { clippedPct: 100 * clipped / n, darkPct: 100 * dark / n, meanLuma: s / n } };
+  }
+
   function laplacianVariance(g, W, H) {
     let sum = 0, sum2 = 0, n = 0;
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
@@ -143,12 +155,13 @@
     return { g: o, W: w, H: h };
   }
 
-  function analyzeFrame(gray, W, H, prevGray) {
+  // ex: exposure from lumaAndExposure, if already computed
+  function analyzeFrame(gray, W, H, prevGray, ex) {
     const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
     const t0 = now();
     const sharpness = laplacianVariance(gray, W, H);
     const t1 = now();
-    const ex = exposure(gray);
+    if (!ex) ex = exposure(gray);
     const mo = motion(gray, prevGray);
     const t2 = now();
     // Shelf edges are long, coarse structures: find them on a half-size frame (a quarter of the
@@ -167,7 +180,7 @@
     };
   }
 
-  const api = { analyzeFrame, lumaFromRGBA, laplacianVariance, shelfLines, rollAndSkew };
+  const api = { analyzeFrame, lumaFromRGBA, lumaAndExposure, laplacianVariance, shelfLines, rollAndSkew };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.ShelfAnalysis = api;
 })(typeof self !== "undefined" ? self : this);
