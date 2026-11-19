@@ -161,7 +161,7 @@
     und auf dem Server geprüft. <a id="save" href="#" style="color:var(--ok)">Foto speichern</a></p>
 </section>
 
-<script src="shelf-analysis.js?v=2026-11-19e"></script>
+<script src="shelf-analysis.js?v=2026-11-19f"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -269,6 +269,18 @@ const AW = Math.max(120, Math.min(480, Number(Q.get("w")) || 240));
 const small = document.createElement("canvas"),
       sctx = small.getContext("2d", SCALE === "gpu" ? {} : { willReadFrequently: true });
 let analysing = false;
+// Analysis in a Web Worker (another CPU core) where possible; ?worker=0 keeps it on the main thread.
+let worker = null, workerResolve = null;
+if (SCALE === "bitmap" && window.Worker && window.OffscreenCanvas && Q.get("worker") !== "0") {
+  try {
+    worker = new Worker("analysis-worker.js?v=2026-11-19f");
+    worker.onmessage = e => { const f = workerResolve; workerResolve = null; if (f) f(e.data); };
+    worker.onerror = () => { worker = null; const f = workerResolve; workerResolve = null; if (f) f(null); };
+  } catch { worker = null; }
+}
+function analyseInWorker(bmp, W, H) {
+  return new Promise(res => { workerResolve = res; worker.postMessage({ bmp, W, H }, [bmp]); });
+}
 async function tick() {
   if (!video.videoWidth || busy || analysing) return;
   analysing = true;
@@ -278,6 +290,17 @@ async function tickInner() {
   const W = AW, H = Math.round(W * video.videoHeight / video.videoWidth);
   if (small.width !== W || small.height !== H) { small.width = W; small.height = H; }
   const t0 = performance.now();
+  if (worker) {
+    const bmp = await createImageBitmap(video, { resizeWidth: W, resizeHeight: H, resizeQuality: "low" });
+    const t1 = performance.now();
+    const r = await analyseInWorker(bmp, W, H);
+    if (!r || !running) return;                        // worker failed: next tick runs on the main thread
+    const t2 = performance.now();
+    r.ms = t2 - t0; r.W = W; r.H = H;
+    r.times = { draw: t1 - t0, read: r.workerTimes.read, analyze: r.workerTimes.analyze,
+                wait: t2 - t1 - r.workerTimes.read - r.workerTimes.analyze, render: lastRenderMs };
+    return finishTick(r, null);
+  }
   if (SCALE === "bitmap") {
     const bmp = await createImageBitmap(video, { resizeWidth: W, resizeHeight: H, resizeQuality: "low" });
     sctx.drawImage(bmp, 0, 0); bmp.close();
@@ -292,10 +315,14 @@ async function tickInner() {
   const t3 = performance.now();
   r.ms = t3 - t0; r.W = W; r.H = H;
   r.times = { draw: t1 - t0, read: t2 - t1, analyze: t3 - t2, render: lastRenderMs };
+  return finishTick(r, gray);
+}
+function finishTick(r, gray) {
   const now = performance.now();
   if (r.motion != null && prevT) r.motion *= 150 / Math.max(30, now - prevT);   // per 150 ms, the scale the thresholds were set for
   r.interval = prevT ? now - prevT : null;
-  prevGray = gray; prevT = now;
+  if (gray) prevGray = gray;
+  prevT = now;
   sharpHist.push({ t: now, v: r.sharpness });
   sharpHist = sharpHist.filter(s => now - s.t < 3000);
   r.sharpRef = Math.max(...sharpHist.map(s => s.v));
@@ -382,11 +409,12 @@ function render(s, now) {
   if (!$("debug").hidden) {
     const r = s.r, f = v => v == null ? "–" : v.toFixed(1);
     $("debug").textContent =
-      `Version Seite 2026-11-19e, Analyse ${A.VERSION || "alt"}\n` +
+      `Version Seite 2026-11-19f, Analyse ${A.VERSION || "alt"}\n` +
       `Stream ${video.videoWidth}×${video.videoHeight}, Analyse ${r.W}×${r.H}\n` +
-      `Takt: alle ${f(r.interval)} ms\n` +
+      `Takt: alle ${f(r.interval)} ms, Verzögerung ${f(r.ms)} ms, Worker ${worker ? "ja" : "nein"}\n` +
       `  verkleinern ${f(r.times.draw)}  auslesen ${f(r.times.read)}\n` +
-      `  Analyse ${f(r.times.analyze)}  Zeichnen ${f(r.times.render)} ms\n` +
+      `  Analyse ${f(r.times.analyze)}  Zeichnen ${f(r.times.render)}` +
+      (r.times.wait != null ? `  Übergabe ${f(r.times.wait)}` : "") + ` ms\n` +
       `  davon Schärfe ${f(r.parts.sharp)}  Bewegung ${f(r.parts.exposure)}  Böden ${f(r.parts.lines)}\n` +
       `Verkleinern per ${SCALE}, Stream angefordert ${RES[0]}×${RES[1]}\n` +
       `Schärfe ${r.sharpness.toFixed(0)} / max ${r.sharpRef.toFixed(0)}\n` +
