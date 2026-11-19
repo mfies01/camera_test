@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1210">
+<title>Regalfoto</title>
+<style>
+  /* Camera UI, one dark look on purpose (a viewfinder). Prototype of the guided capture. */
+  :root {
+    color-scheme: dark;
+    --bg: #0d1210; --panel: rgba(13, 18, 16, .78); --fg: #eef3ef; --muted: #9aa8a0;
+    --ok: #3ccf7a; --warn: #f2c230; --bad: #ff5a4f; --line: rgba(238, 243, 239, .55);
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 var(--font); }
+  button { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  /* ---------- screens ---------- */
+  .screen { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  .intro { overflow-y: auto; padding: calc(env(safe-area-inset-top) + 20px) max(20px, env(safe-area-inset-right))
+           calc(env(safe-area-inset-bottom) + 24px) max(20px, env(safe-area-inset-left)); gap: 16px; }
+  .intro h1 { font-size: 24px; margin: 0; text-wrap: balance; }
+  .intro p { margin: 0; color: var(--muted); max-width: 36em; }
+  .intro ol { margin: 0; padding-left: 1.3em; display: grid; gap: 10px; max-width: 36em; }
+  .intro ol b { color: var(--fg); }
+  .intro figure { margin: 0; max-width: 420px; }
+  .intro figure svg { width: 100%; height: auto; display: block; }
+  .intro figcaption { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .btn { border: 0; border-radius: 12px; padding: 14px 18px; font-weight: 600; background: #26302b; }
+  .btn.primary { background: var(--ok); color: #06210f; }
+  .btn:focus-visible, .shutter:focus-visible, .chip:focus-visible { outline: 3px solid var(--fg); outline-offset: 2px; }
+  .fineprint { font-size: 13px; color: var(--muted); }
+
+  /* ---------- camera ---------- */
+  .cam { background: #000; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .hint { position: absolute; left: 0; right: 0; top: 0; z-index: 2;
+          padding: calc(env(safe-area-inset-top) + 10px) max(14px, env(safe-area-inset-right)) 12px max(14px, env(safe-area-inset-left));
+          background: var(--panel); text-align: center; font-weight: 600; font-size: 18px; transition: color .2s; }
+  .hint small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .hint.ok { color: var(--ok); } .hint.warn { color: var(--warn); } .hint.bad { color: var(--bad); }
+  .bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; background: var(--panel);
+         padding: 10px max(14px, env(safe-area-inset-right)) calc(env(safe-area-inset-bottom) + 12px) max(14px, env(safe-area-inset-left));
+         display: grid; gap: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+          background: rgba(255,255,255,.08); font-size: 13px; border: 0; }
+  .chip i { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .chip.ok i { background: var(--ok); } .chip.warn i { background: var(--warn); } .chip.bad i { background: var(--bad); }
+  .controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
+  .controls .left { justify-self: start; } .controls .right { justify-self: end; }
+  .small-btn { background: rgba(255,255,255,.1); border: 0; border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+  .small-btn[aria-pressed="true"] { background: rgba(60, 207, 122, .25); color: var(--ok); }
+  .shutter { width: 72px; height: 72px; border-radius: 50%; border: 4px solid var(--fg); background: #555;
+             transition: background .2s, transform .1s; position: relative; }
+  .shutter.ready { background: var(--ok); }
+  .shutter:active { transform: scale(.94); }
+  .shutter svg { position: absolute; inset: -4px; width: 72px; height: 72px; }
+  #debug { position: absolute; left: 8px; z-index: 2; top: calc(env(safe-area-inset-top) + 76px);
+           background: rgba(0,0,0,.65); padding: 6px 8px; border-radius: 6px;
+           font: 11px/1.35 var(--mono); white-space: pre; pointer-events: none; }
+  .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 3; transition: opacity .25s; }
+  .flash.on { opacity: .7; transition: none; }
+
+  /* ---------- review ---------- */
+  .review { overflow-y: auto; padding: calc(env(safe-area-inset-top) + 16px) max(16px, env(safe-area-inset-right))
+            calc(env(safe-area-inset-bottom) + 20px) max(16px, env(safe-area-inset-left)); gap: 14px; }
+  .review h2 { margin: 0; font-size: 20px; }
+  .review img { width: 100%; max-height: 60vh; object-fit: contain; background: #000; border-radius: 10px; }
+  .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .facts dt { color: var(--muted); } .facts dd { margin: 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; }
+  .row .btn { flex: 1 1 160px; }
+  .error { background: #3a1513; color: #ffd9d6; border-radius: 10px; padding: 12px; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<!-- ============ 1. Anleitung ============ -->
+<section class="screen intro" id="intro">
+  <h1>Regal fotografieren</h1>
+  <p>Ein Foto pro Regalsegment. Die Kamera hilft beim Ausrichten und meldet, wenn etwas nicht passt.</p>
+  <figure>
+    <svg viewBox="0 0 420 210" role="img" aria-label="Skizze: Person steht mittig vor dem Regal, etwa zwei Meter entfernt, und hält das Telefon senkrecht">
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#9aa8a0"/></marker></defs>
+      <!-- shelf, front view -->
+      <rect x="20" y="20" width="130" height="170" rx="4" fill="none" stroke="#eef3ef" stroke-width="2"/>
+      <g stroke="#eef3ef" stroke-width="2"><line x1="20" y1="62" x2="150" y2="62"/><line x1="20" y1="104" x2="150" y2="104"/><line x1="20" y1="146" x2="150" y2="146"/></g>
+      <g fill="#3ccf7a" opacity=".55">
+        <rect x="28" y="32" width="16" height="28"/><rect x="48" y="36" width="16" height="24"/><rect x="68" y="32" width="16" height="28"/><rect x="92" y="38" width="22" height="22"/><rect x="118" y="34" width="22" height="26"/>
+        <rect x="28" y="76" width="22" height="26"/><rect x="54" y="76" width="22" height="26"/><rect x="82" y="72" width="14" height="30"/><rect x="100" y="72" width="14" height="30"/><rect x="118" y="76" width="22" height="26"/>
+        <rect x="28" y="116" width="30" height="28"/><rect x="62" y="116" width="30" height="28"/><rect x="98" y="120" width="42" height="24"/>
+        <rect x="28" y="158" width="52" height="30"/><rect x="86" y="158" width="54" height="30"/></g>
+      <!-- dashed frame: whole segment in the picture -->
+      <rect x="12" y="12" width="146" height="186" rx="6" fill="none" stroke="#3ccf7a" stroke-width="2" stroke-dasharray="7 5"/>
+      <!-- distance arrow -->
+      <line x1="170" y1="105" x2="300" y2="105" stroke="#9aa8a0" stroke-width="1.5" marker-start="url(#ah)" marker-end="url(#ah)"/>
+      <text x="235" y="96" text-anchor="middle" font-size="13" fill="#9aa8a0" font-family="system-ui, sans-serif">ca. 1,5–2 m, mittig</text>
+      <!-- phone, upright -->
+      <rect x="318" y="60" width="44" height="88" rx="8" fill="none" stroke="#eef3ef" stroke-width="2.5"/>
+      <rect x="324" y="70" width="32" height="64" rx="2" fill="#3ccf7a" opacity=".25"/>
+      <line x1="340" y1="40" x2="340" y2="168" stroke="#3ccf7a" stroke-width="1.5" stroke-dasharray="3 4"/>
+      <text x="340" y="190" text-anchor="middle" font-size="13" fill="#9aa8a0" font-family="system-ui, sans-serif">senkrecht halten</text>
+    </svg>
+    <figcaption>Mittig vor das Regal stellen, so weit weg, dass das ganze Segment ins Bild passt.</figcaption>
+  </figure>
+  <ol>
+    <li><b>Ganzes Segment ins Bild,</b> vom obersten bis zum untersten Boden, mit etwas Rand.</li>
+    <li><b>Mittig davorstehen</b> und das Telefon senkrecht halten, nicht schräg von der Seite.</li>
+    <li><b>Ruhig halten,</b> bis der Auslöser grün wird.</li>
+    <li><b>Bei Glastüren:</b> Spiegelungen vermeiden, notfalls einen Schritt zur Seite und zurück.</li>
+  </ol>
+  <button class="btn primary" id="start">Kamera starten</button>
+  <p class="fineprint">Prototyp. Es wird nichts hochgeladen; Fotos bleiben auf diesem Telefon.
+    Die Kamera braucht eine sichere Verbindung (HTTPS).</p>
+  <div class="error" id="startError" hidden></div>
+</section>
+
+<!-- ============ 2. Kamera ============ -->
+<section class="screen cam" id="cam" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div class="hint" id="hint" role="status" aria-live="polite">Kamera wird gestartet …</div>
+  <div id="debug" hidden></div>
+  <div class="flash" id="flash"></div>
+  <div class="bar">
+    <div class="chips" id="chips"></div>
+    <div class="controls">
+      <button class="small-btn left" id="back">Anleitung</button>
+      <button class="shutter" id="shutter" aria-label="Foto aufnehmen">
+        <svg viewBox="0 0 72 72" aria-hidden="true"><circle id="ring" cx="36" cy="36" r="33" fill="none" stroke="#eef3ef"
+          stroke-width="4" stroke-dasharray="207.3" stroke-dashoffset="207.3" transform="rotate(-90 36 36)"/></svg>
+      </button>
+      <div class="right row" style="gap:6px; flex-wrap:nowrap">
+        <button class="small-btn" id="auto" aria-pressed="false" title="Automatisch auslösen, sobald alles passt">Auto</button>
+        <button class="small-btn" id="dbg" aria-pressed="false" title="Messwerte anzeigen">i</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 3. Prüfen ============ -->
+<section class="screen review" id="review" hidden>
+  <h2 id="reviewTitle">Foto prüfen</h2>
+  <img id="shot" alt="Aufgenommenes Regalfoto">
+  <dl class="facts" id="facts"></dl>
+  <div class="row">
+    <button class="btn" id="retake">Neu aufnehmen</button>
+    <button class="btn primary" id="use">Foto verwenden</button>
+  </div>
+  <p class="fineprint" id="useNote" hidden>Im Prototyp endet es hier: In der echten Web-App würde das Foto jetzt hochgeladen
+    und auf dem Server geprüft. <a id="save" href="#" style="color:var(--ok)">Foto speichern</a></p>
+</section>
+
+<script src="shelf-analysis.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const video = $("video"), overlay = $("overlay");
+const A = window.ShelfAnalysis;
+
+// ---------- thresholds (to be tuned on real shelves) ----------
+const T = {
+  sharpRatioBad: 0.45, sharpRatioWarn: 0.65,  // vs. the sharpest frame of the last 3 s
+  sharpAbsBad: 25,                            // Laplace variance on the 320 px frame
+  motionBad: 9, motionWarn: 5,                // mean abs frame difference
+  glareWarn: 2, glareBad: 6,                  // % clipped pixels
+  darkWarn: 25, darkBad: 45,                  // % near-black pixels
+  pitchWarn: 8, pitchBad: 14,                 // camera up/down, degrees (sensor)
+  rollWarn: 2.5, rollBad: 5,                  // shelf edges vs. screen horizontal, degrees
+  skewWarn: 6, skewBad: 11,                   // side view, see shelf-analysis.js
+  steadyMs: 700, autoMs: 1200,                // green for this long -> ready / auto shot
+};
+
+let stream = null, track = null, imageCapture = null, timer = null;
+let prevGray = null, sharpHist = [], up = null;
+let state = null, greenSince = 0, autoOn = false, busy = false;
+
+// ---------- screens ----------
+function show(id) { for (const s of ["intro", "cam", "review"]) $(s).hidden = s !== id; }
+
+// ---------- sensors: "up" vector in device coordinates from deviceorientation ----------
+// up = (-cos b sin g, sin b, cos b cos g); upright portrait gives (0, 1, 0).
+window.addEventListener("deviceorientation", e => {
+  if (e.beta == null || e.gamma == null) return;
+  const b = e.beta * Math.PI / 180, g = e.gamma * Math.PI / 180;
+  const u = [-Math.cos(b) * Math.sin(g), Math.sin(b), Math.cos(b) * Math.cos(g)];
+  up = up ? up.map((v, i) => 0.7 * v + 0.3 * u[i]) : u;   // light smoothing
+});
+function sensorAngles() {
+  if (!up) return null;
+  const a = ((screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0) * Math.PI / 180;
+  const sx = up[0] * Math.cos(a) - up[1] * Math.sin(a), sy = up[0] * Math.sin(a) + up[1] * Math.cos(a);
+  const n = Math.hypot(up[0], up[1], up[2]) || 1;
+  return {
+    pitch: -Math.asin(Math.max(-1, Math.min(1, up[2] / n))) * 180 / Math.PI,  // + = camera points up
+    roll: Math.atan2(sx, sy) * 180 / Math.PI,
+  };
+}
+
+// ---------- start / stop ----------
+async function start() {
+  $("startError").hidden = true;
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    return fail("Die Kamera ist hier nicht verfügbar: Die Seite muss über HTTPS geöffnet werden.");
+  }
+  // iPhone: motion sensors need a permission, asked from this tap.
+  for (const E of [window.DeviceOrientationEvent, window.DeviceMotionEvent]) {
+    if (E && typeof E.requestPermission === "function") { try { await E.requestPermission(); } catch {} }
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 3840 }, height: { ideal: 2160 } } });
+  } catch (e) {
+    return fail(e.name === "NotAllowedError"
+      ? "Der Kamerazugriff wurde nicht erlaubt. In den Browser-Einstellungen für diese Seite die Kamera erlauben und neu laden."
+      : `Die Kamera ließ sich nicht starten (${e.name}).`);
+  }
+  track = stream.getVideoTracks()[0];
+  imageCapture = "ImageCapture" in window ? new ImageCapture(track) : null;
+  video.srcObject = stream;
+  show("cam");
+  await video.play().catch(() => {});
+  sharpHist = []; prevGray = null; greenSince = 0;
+  timer = setInterval(tick, 150);
+}
+function stop() {
+  clearInterval(timer); timer = null;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = track = imageCapture = null;
+}
+function fail(msg) { show("intro"); $("startError").textContent = msg; $("startError").hidden = false; }
+
+// ---------- live analysis ----------
+const small = document.createElement("canvas"), sctx = small.getContext("2d", { willReadFrequently: true });
+function tick() {
+  if (!video.videoWidth || busy) return;
+  const W = 320, H = Math.round(W * video.videoHeight / video.videoWidth);
+  small.width = W; small.height = H;
+  sctx.drawImage(video, 0, 0, W, H);
+  const t0 = performance.now();
+  const gray = A.lumaFromRGBA(sctx.getImageData(0, 0, W, H).data, W * H);
+  const r = A.analyzeFrame(gray, W, H, prevGray);
+  r.ms = performance.now() - t0; r.W = W; r.H = H;
+  prevGray = gray;
+  const now = performance.now();
+  sharpHist.push({ t: now, v: r.sharpness });
+  sharpHist = sharpHist.filter(s => now - s.t < 3000);
+  r.sharpRef = Math.max(...sharpHist.map(s => s.v));
+  r.sensor = sensorAngles();
+  state = evaluate(r);
+  render(state, now);
+}
+
+// Each check: level ok/warn/bad/none, a short chip label and, if not ok, the hint for the banner.
+// Order = priority of the hint shown.
+function evaluate(r) {
+  const checks = [];
+  const lvl = (v, warn, bad) => v >= bad ? "bad" : v >= warn ? "warn" : "ok";
+
+  const steady = r.motion == null ? "ok" : lvl(r.motion, T.motionWarn, T.motionBad);
+  const ratio = r.sharpRef > 0 ? r.sharpness / r.sharpRef : 1;
+  let sharp = ratio < T.sharpRatioBad || r.sharpness < T.sharpAbsBad ? "bad" : ratio < T.sharpRatioWarn ? "warn" : "ok";
+  if (steady === "bad") sharp = "bad";
+  checks.push({ key: "sharp", label: "Schärfe", level: sharp,
+    hint: steady !== "ok" ? "Telefon ruhig halten" : "Unscharf – kurz warten, bis die Kamera scharf stellt" });
+
+  const sp = r.sensor;
+  if (sp) {
+    const p = Math.abs(sp.pitch);
+    checks.push({ key: "pitch", label: "Senkrecht", level: lvl(p, T.pitchWarn, T.pitchBad),
+      hint: sp.pitch > 0 ? "Kamera zeigt nach oben – Telefon senkrecht halten" : "Kamera zeigt nach unten – Telefon senkrecht halten" });
+  } else checks.push({ key: "pitch", label: "Senkrecht", level: "none" });
+
+  // Roll: from the shelf edges when found (that is what has to be level), else from the sensor.
+  const roll = r.rollDeg != null && r.lines.length >= 2 ? r.rollDeg : sp ? sp.roll : null;  // both: + = phone turned counter-clockwise
+  r.rollUsed = roll;
+  checks.push(roll == null ? { key: "roll", label: "Gerade", level: "none" }
+    : { key: "roll", label: "Gerade", level: lvl(Math.abs(roll), T.rollWarn, T.rollBad),
+        hint: roll > 0 ? "Telefon etwas im Uhrzeigersinn drehen" : "Telefon etwas gegen den Uhrzeigersinn drehen",
+        sub: "Die Regalböden sollen waagerecht im Bild liegen" });
+
+  checks.push(r.skewDeg == null ? { key: "skew", label: "Mittig", level: "none" }
+    : { key: "skew", label: "Mittig", level: lvl(Math.abs(r.skewDeg), T.skewWarn, T.skewBad),
+        hint: r.skewDeg < 0 ? "Ein Stück nach rechts gehen" : "Ein Stück nach links gehen",
+        sub: "Gerade von vorn auf das Regal zielen, nicht schräg" });
+
+  checks.push({ key: "glare", label: "Spiegelung", level: lvl(r.clippedPct, T.glareWarn, T.glareBad),
+    hint: "Spiegelung im Bild – Winkel leicht ändern" });
+  checks.push({ key: "dark", label: "Licht", level: lvl(r.darkPct, T.darkWarn, T.darkBad),
+    hint: "Zu dunkel – mehr Licht oder näher heran" });
+
+  checks.push({ key: "shelf", label: `Böden: ${r.lines.length}`, level: r.lines.length >= 2 ? "ok" : "warn",
+    hint: "Regalböden nicht erkannt – ganzes Segment in den Rahmen bringen", soft: true });
+
+  const blocking = checks.filter(c => !c.soft && (c.level === "bad" || c.level === "warn"));
+  const firstBad = checks.find(c => c.level === "bad") || blocking[0] || checks.find(c => c.level === "warn");
+  return { r, checks, good: !checks.some(c => !c.soft && c.level === "bad") && !blocking.length, top: firstBad };
+}
+
+function render(s, now) {
+  // banner
+  const hint = $("hint");
+  if (s.good) {
+    if (!greenSince) greenSince = now;
+    const ready = now - greenSince >= T.steadyMs;
+    hint.className = "hint ok";
+    hint.innerHTML = ready ? (autoOn ? "Passt – Foto wird aufgenommen" : "Passt – jetzt auslösen") : "Fast – ruhig halten";
+    if (s.top && s.top.soft) hint.innerHTML += `<small>${s.top.hint}</small>`;
+  } else {
+    greenSince = 0;
+    hint.className = "hint " + s.top.level;
+    hint.innerHTML = s.top.hint + (s.top.sub ? `<small>${s.top.sub}</small>` : "");
+  }
+  const ready = s.good && now - greenSince >= T.steadyMs;
+  $("shutter").classList.toggle("ready", ready);
+  // auto-capture progress ring
+  const ring = $("ring"), C = 207.3;
+  const p = autoOn && s.good ? Math.min(1, (now - greenSince) / T.autoMs) : 0;
+  ring.setAttribute("stroke-dashoffset", String(C * (1 - p)));
+  if (autoOn && p >= 1 && !busy) capture();
+
+  // chips
+  $("chips").innerHTML = s.checks.map(c => `<span class="chip ${c.level}"><i></i>${c.label}</span>`).join("");
+
+  drawOverlay(s);
+  if (!$("debug").hidden) {
+    const r = s.r, f = v => v == null ? "–" : v.toFixed(1);
+    $("debug").textContent =
+      `Stream ${video.videoWidth}×${video.videoHeight}\n` +
+      `Analyse ${r.W}×${r.H} in ${r.ms.toFixed(0)} ms\n` +
+      `Schärfe ${r.sharpness.toFixed(0)} / max ${r.sharpRef.toFixed(0)}\n` +
+      `Bewegung ${f(r.motion)}\n` +
+      `hell ${f(r.clippedPct)} %  dunkel ${f(r.darkPct)} %\n` +
+      `Böden ${r.lines.length}  Neigung Bild ${f(r.rollDeg)}°  schräg ${f(r.skewDeg)}°\n` +
+      `Sensor: ${r.sensor ? `vor/zurück ${f(r.sensor.pitch)}°  seitlich ${f(r.sensor.roll)}°` : "keine Daten"}\n` +
+      `Bildschirm ${(screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0}°\n` +
+      `takePhoto ${imageCapture ? "ja" : "nein"}`;
+  }
+}
+
+// Map analysis coordinates to the displayed (object-fit: contain) video rectangle.
+function videoRect() {
+  const cw = overlay.clientWidth, ch = overlay.clientHeight, vw = video.videoWidth, vh = video.videoHeight;
+  const k = Math.min(cw / vw, ch / vh), w = vw * k, h = vh * k;
+  return { x: (cw - w) / 2, y: (ch - h) / 2, w, h };
+}
+function drawOverlay(s) {
+  const dpr = devicePixelRatio || 1, cw = overlay.clientWidth, ch = overlay.clientHeight;
+  if (overlay.width !== Math.round(cw * dpr)) { overlay.width = Math.round(cw * dpr); overlay.height = Math.round(ch * dpr); }
+  const c = overlay.getContext("2d");
+  c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, cw, ch);
+  const R = videoRect(), r = s.r, sx = R.w / r.W, sy = R.h / r.H;
+  const col = { ok: "#3ccf7a", warn: "#f2c230", bad: "#ff5a4f", none: "rgba(238,243,239,.55)" };
+
+  // frame: the whole segment belongs inside
+  const m = 0.05;
+  c.setLineDash([10, 7]); c.lineWidth = 2;
+  c.strokeStyle = s.good ? col.ok : "rgba(238,243,239,.6)";
+  c.strokeRect(R.x + R.w * m, R.y + R.h * m, R.w * (1 - 2 * m), R.h * (1 - 2 * m));
+  c.setLineDash([]);
+
+  // detected shelf edges, coloured by the roll / side-view verdict
+  const rollC = s.checks.find(k => k.key === "roll"), skewC = s.checks.find(k => k.key === "skew");
+  const worst = [rollC, skewC].map(k => k && k.level).includes("bad") ? "bad"
+    : [rollC, skewC].map(k => k && k.level).includes("warn") ? "warn" : "ok";
+  c.lineWidth = 3; c.strokeStyle = col[worst]; c.globalAlpha = .85;
+  for (const l of r.lines) {
+    const t = Math.tan(l.angleDeg * Math.PI / 180);
+    const y0 = l.yMid - t * r.W / 2, y1 = l.yMid + t * r.W / 2;
+    c.beginPath(); c.moveTo(R.x, R.y + y0 * sy); c.lineTo(R.x + R.w, R.y + y1 * sy); c.stroke();
+  }
+  c.globalAlpha = 1;
+
+  // spirit level in the centre: a short bar that tilts with the roll, a dot that moves with the pitch
+  const cx = R.x + R.w / 2, cy = R.y + R.h / 2, L = Math.min(R.w, R.h) * 0.18;
+  const roll = r.rollUsed, pitch = r.sensor ? r.sensor.pitch : null;
+  c.lineWidth = 2; c.strokeStyle = "rgba(238,243,239,.5)";
+  c.beginPath(); c.moveTo(cx - L, cy); c.lineTo(cx - L * .35, cy); c.moveTo(cx + L * .35, cy); c.lineTo(cx + L, cy); c.stroke();
+  if (roll != null) {
+    const a = roll * Math.PI / 180;
+    c.strokeStyle = col[rollC.level]; c.lineWidth = 3;
+    c.beginPath(); c.moveTo(cx - L * Math.cos(a), cy - L * Math.sin(a)); c.lineTo(cx + L * Math.cos(a), cy + L * Math.sin(a)); c.stroke();
+  }
+  if (pitch != null) {
+    const pc = s.checks.find(k => k.key === "pitch");
+    const dy = Math.max(-1, Math.min(1, pitch / 30)) * L;
+    c.fillStyle = col[pc.level];
+    c.beginPath(); c.arc(cx, cy + dy, 7, 0, 2 * Math.PI); c.fill();
+    c.strokeStyle = "rgba(238,243,239,.5)"; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(cx, cy, 11, 0, 2 * Math.PI); c.stroke();
+  }
+}
+
+// ---------- capture ----------
+let lastShot = null;
+async function capture() {
+  if (busy || !track) return;
+  busy = true;
+  const snapshot = state, t0 = performance.now();
+  $("flash").classList.add("on"); setTimeout(() => $("flash").classList.remove("on"), 60);
+  let blob = null, source = "";
+  if (imageCapture) {
+    try {
+      const pc = await imageCapture.getPhotoCapabilities().catch(() => null);
+      blob = await imageCapture.takePhoto(pc && pc.imageWidth && pc.imageWidth.max ? { imageWidth: pc.imageWidth.max } : {});
+      source = "Foto (takePhoto)";
+    } catch { blob = null; }
+  }
+  if (!blob) {
+    const cv = document.createElement("canvas"); cv.width = video.videoWidth; cv.height = video.videoHeight;
+    cv.getContext("2d").drawImage(video, 0, 0);
+    blob = await new Promise(r => cv.toBlob(r, "image/jpeg", 0.92));
+    source = "Videobild";
+  }
+  const ms = performance.now() - t0;
+  let w = "?", h = "?";
+  try { const b = await createImageBitmap(blob); w = b.width; h = b.height; b.close(); } catch {}
+  stop();
+  if (lastShot) URL.revokeObjectURL(lastShot);
+  lastShot = URL.createObjectURL(blob);
+  $("shot").src = lastShot;
+  $("save").href = lastShot; $("save").download = "regalfoto.jpg";
+  const open = snapshot ? snapshot.checks.filter(c => !c.soft && c.level !== "ok" && c.level !== "none") : [];
+  $("reviewTitle").textContent = open.length ? "Foto prüfen – nicht alles passte" : "Foto prüfen";
+  const mp = typeof w === "number" ? ` (${(w * h / 1e6).toFixed(1)} MP)` : "";
+  const rows = [
+    ["Aufnahme", source],
+    ["Auflösung", `${w} × ${h}${mp}`],
+    ["Größe", `${(blob.size / 1048576).toFixed(1)} MB`],
+    ["Dauer", `${Math.round(ms)} ms`],
+    ["Beim Auslösen", open.length ? open.map(c => c.hint).join("; ") : "alle Prüfungen grün"],
+  ];
+  $("facts").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd></dd>`).join("");
+  [...$("facts").querySelectorAll("dd")].forEach((dd, i) => (dd.textContent = rows[i][1]));
+  $("useNote").hidden = true;
+  show("review");
+  busy = false;
+}
+
+// ---------- wiring ----------
+$("start").onclick = start;
+$("shutter").onclick = capture;
+$("back").onclick = () => { stop(); show("intro"); };
+$("retake").onclick = start;
+$("use").onclick = () => { $("useNote").hidden = false; };
+$("auto").onclick = () => { autoOn = !autoOn; $("auto").setAttribute("aria-pressed", String(autoOn)); greenSince = 0; };
+$("dbg").onclick = () => { const d = $("debug"); d.hidden = !d.hidden; $("dbg").setAttribute("aria-pressed", String(!d.hidden)); };
+document.addEventListener("visibilitychange", () => { if (document.hidden && stream) { stop(); show("intro"); } });
+</script>
+</body>
+</html>
