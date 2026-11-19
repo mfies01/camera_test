@@ -144,18 +144,26 @@
   }
 
   function analyzeFrame(gray, W, H, prevGray) {
+    const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+    const t0 = now();
+    const sharpness = laplacianVariance(gray, W, H);
+    const t1 = now();
     const ex = exposure(gray);
+    const mo = motion(gray, prevGray);
+    const t2 = now();
     // Shelf edges are long, coarse structures: find them on a half-size frame (a quarter of the
     // pixels), then scale back to the analysis frame.
     const half = halfSize(gray, W, H);
     const lines = shelfLines(half.g, half.W, half.H).map(l =>
       ({ angleDeg: l.angleDeg, yMid: l.yMid * H / half.H, votes: l.votes, coverage: l.coverage }));
     const rs = rollAndSkew(lines, H);
+    const t3 = now();
     return {
-      sharpness: laplacianVariance(gray, W, H),
+      sharpness,
       clippedPct: ex.clippedPct, darkPct: ex.darkPct, meanLuma: ex.meanLuma,
-      motion: motion(gray, prevGray),
+      motion: mo,
       lines, rollDeg: rs.rollDeg, skewDeg: rs.skewDeg,
+      parts: { sharp: t1 - t0, exposure: t2 - t1, lines: t3 - t2 },
     };
   }
 

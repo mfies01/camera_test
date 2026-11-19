@@ -181,10 +181,10 @@ const T = {
 
 let stream = null, track = null, imageCapture = null;
 let prevGray = null, prevT = 0, sharpHist = [], up = null, running = false;
-const MIN_INTERVAL_MS = 66;
+const MIN_INTERVAL_MS = 66;   // at most ~15 analyses per second
 let lastRenderMs = 0;
 // ?res=1080 requests a 1080p stream instead of 4K (to compare the cost of the larger stream)
-const RES = new URLSearchParams(location.search).get("res") === "1080" ? [1920, 1080] : [3840, 2160];   // at most ~15 analyses per second
+const RES = new URLSearchParams(location.search).get("res") === "1080" ? [1920, 1080] : [3840, 2160];
 let state = null, greenSince = 0, autoOn = false, busy = false;
 
 // ---------- screens ----------
@@ -255,13 +255,29 @@ function stop() {
 function fail(msg) { show("intro"); $("startError").textContent = msg; $("startError").hidden = false; }
 
 // ---------- live analysis ----------
-const small = document.createElement("canvas"), sctx = small.getContext("2d", { willReadFrequently: true });
-function tick() {
-  if (!video.videoWidth || busy) return;
+// How the camera frame is scaled down to 320 px (?scale=gpu|cpu|bitmap, default gpu):
+//  gpu    - a normal canvas: the graphics chip scales, only the small image is read back
+//  cpu    - a willReadFrequently canvas: the whole frame is copied to main memory first (slow on Android)
+//  bitmap - createImageBitmap with resize, then a small CPU canvas
+const SCALE = ["gpu", "cpu", "bitmap"].includes(new URLSearchParams(location.search).get("scale"))
+  ? new URLSearchParams(location.search).get("scale") : "gpu";
+const small = document.createElement("canvas"),
+      sctx = small.getContext("2d", SCALE === "gpu" ? {} : { willReadFrequently: true });
+let analysing = false;
+async function tick() {
+  if (!video.videoWidth || busy || analysing) return;
+  analysing = true;
+  try { await tickInner(); } finally { analysing = false; }
+}
+async function tickInner() {
   const W = 320, H = Math.round(W * video.videoHeight / video.videoWidth);
   if (small.width !== W || small.height !== H) { small.width = W; small.height = H; }
   const t0 = performance.now();
-  sctx.drawImage(video, 0, 0, W, H);                       // scale the camera frame down
+  if (SCALE === "bitmap") {
+    const bmp = await createImageBitmap(video, { resizeWidth: W, resizeHeight: H, resizeQuality: "low" });
+    sctx.drawImage(bmp, 0, 0); bmp.close();
+  } else sctx.drawImage(video, 0, 0, W, H);                  // scale the camera frame down
+  if (!running) return;
   const t1 = performance.now();
   const rgba = sctx.getImageData(0, 0, W, H).data;          // read it back from the GPU
   const t2 = performance.now();
@@ -364,6 +380,8 @@ function render(s, now) {
       `Takt: alle ${f(r.interval)} ms\n` +
       `  verkleinern ${f(r.times.draw)}  auslesen ${f(r.times.read)}\n` +
       `  Analyse ${f(r.times.analyze)}  Zeichnen ${f(r.times.render)} ms\n` +
+      `  davon Schärfe ${f(r.parts.sharp)}  Belichtung ${f(r.parts.exposure)}  Böden ${f(r.parts.lines)}\n` +
+      `Verkleinern per ${SCALE}, Stream angefordert ${RES[0]}×${RES[1]}\n` +
       `Schärfe ${r.sharpness.toFixed(0)} / max ${r.sharpRef.toFixed(0)}\n` +
       `Bewegung ${f(r.motion)}\n` +
       `hell ${f(r.clippedPct)} %  dunkel ${f(r.darkPct)} %\n` +
