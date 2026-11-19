@@ -121,6 +121,8 @@
   <p class="fineprint">Prototyp. Es wird nichts hochgeladen; Fotos bleiben auf diesem Telefon.
     Die Kamera braucht eine sichere Verbindung (HTTPS).</p>
   <div class="error" id="startError" hidden></div>
+  <button class="btn" id="bench">Rechentest (ohne Kamera)</button>
+  <pre class="fineprint" id="benchOut" hidden></pre>
 </section>
 
 <!-- ============ 2. Kamera ============ -->
@@ -159,7 +161,7 @@
     und auf dem Server geprüft. <a id="save" href="#" style="color:var(--ok)">Foto speichern</a></p>
 </section>
 
-<script src="shelf-analysis.js"></script>
+<script src="shelf-analysis.js?v=2026-11-19e"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -380,7 +382,8 @@ function render(s, now) {
   if (!$("debug").hidden) {
     const r = s.r, f = v => v == null ? "–" : v.toFixed(1);
     $("debug").textContent =
-      `Stream ${video.videoWidth}×${video.videoHeight}\n` +
+      `Version Seite 2026-11-19e, Analyse ${A.VERSION || "alt"}\n` +
+      `Stream ${video.videoWidth}×${video.videoHeight}, Analyse ${r.W}×${r.H}\n` +
       `Takt: alle ${f(r.interval)} ms\n` +
       `  verkleinern ${f(r.times.draw)}  auslesen ${f(r.times.read)}\n` +
       `  Analyse ${f(r.times.analyze)}  Zeichnen ${f(r.times.render)} ms\n` +
@@ -495,7 +498,31 @@ async function capture() {
   busy = false;
 }
 
+// ---------- CPU test: analysis time on a synthetic shelf-like frame, without the camera ----------
+function benchmark() {
+  const out = [];
+  for (const W of [240, 320]) {
+    const H = Math.round(W * 16 / 9), g = new Float32Array(W * H), rgba = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const v = (y % 60 < 3 ? 30 : 140) + 60 * Math.sin(x * 0.3) * Math.cos(y * 0.2) + 20 * Math.random();
+      g[y * W + x] = v; rgba.fill(v, 4 * (y * W + x), 4 * (y * W + x) + 3);
+    }
+    A.analyzeFrame(g, W, H, g);                                  // warm-up
+    const n = 10, t0 = performance.now(); let parts = { sharp: 0, exposure: 0, lines: 0 };
+    for (let i = 0; i < n; i++) {
+      const le = A.lumaAndExposure(rgba, W * H);
+      const r = A.analyzeFrame(le.gray, W, H, g, le.exposure);
+      for (const k in parts) parts[k] += r.parts[k] / n;
+    }
+    const ms = (performance.now() - t0) / n;
+    out.push(`${W}×${H}: ${ms.toFixed(1)} ms  (Schärfe ${parts.sharp.toFixed(1)}, Bewegung ${parts.exposure.toFixed(1)}, Böden ${parts.lines.toFixed(1)})`);
+  }
+  out.push(`Version ${A.VERSION || "alt"}`);
+  $("benchOut").textContent = out.join("\n"); $("benchOut").hidden = false;
+}
+
 // ---------- wiring ----------
+$("bench").onclick = () => { $("benchOut").textContent = "läuft …"; $("benchOut").hidden = false; setTimeout(benchmark, 50); };
 $("start").onclick = start;
 $("shutter").onclick = capture;
 $("back").onclick = () => { stop(); show("intro"); };

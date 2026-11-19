@@ -180,7 +180,7 @@
     };
   }
 
-  const api = { analyzeFrame, lumaFromRGBA, lumaAndExposure, laplacianVariance, shelfLines, rollAndSkew };
+  const api = { VERSION: "2026-11-19e", analyzeFrame, lumaFromRGBA, lumaAndExposure, laplacianVariance, shelfLines, rollAndSkew };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.ShelfAnalysis = api;
 })(typeof self !== "undefined" ? self : this);
