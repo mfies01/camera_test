@@ -42,7 +42,8 @@
   .hint { position: absolute; left: 0; right: 0; top: 0; z-index: 2;
           padding: calc(env(safe-area-inset-top) + 10px) max(14px, env(safe-area-inset-right)) 12px max(14px, env(safe-area-inset-left));
           background: var(--panel); text-align: center; font-weight: 600; font-size: 18px; transition: color .2s; }
-  .hint small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .hint small { display: block; font-weight: 400; font-size: 13px; color: var(--muted); margin-top: 2px;
+                min-height: 1.45em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hint.ok { color: var(--ok); } .hint.warn { color: var(--warn); } .hint.bad { color: var(--bad); }
   .bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; background: var(--panel);
          padding: 10px max(14px, env(safe-area-inset-right)) calc(env(safe-area-inset-bottom) + 12px) max(14px, env(safe-area-inset-left));
@@ -126,7 +127,7 @@
 <section class="screen cam" id="cam" hidden>
   <video id="video" playsinline muted autoplay></video>
   <canvas id="overlay"></canvas>
-  <div class="hint" id="hint" role="status" aria-live="polite">Kamera wird gestartet …</div>
+  <div class="hint" id="hint" role="status" aria-live="polite"><span id="hintMain">Kamera wird gestartet …</span><small id="hintSub"></small></div>
   <div id="debug" hidden></div>
   <div class="flash" id="flash"></div>
   <div class="bar">
@@ -178,8 +179,9 @@ const T = {
   steadyMs: 700, autoMs: 1200,                // green for this long -> ready / auto shot
 };
 
-let stream = null, track = null, imageCapture = null, timer = null;
-let prevGray = null, sharpHist = [], up = null;
+let stream = null, track = null, imageCapture = null;
+let prevGray = null, prevT = 0, sharpHist = [], up = null, running = false;
+const MIN_INTERVAL_MS = 66;   // at most ~15 analyses per second
 let state = null, greenSince = 0, autoOn = false, busy = false;
 
 // ---------- screens ----------
@@ -228,10 +230,22 @@ async function start() {
   show("cam");
   await video.play().catch(() => {});
   sharpHist = []; prevGray = null; greenSince = 0;
-  timer = setInterval(tick, 150);
+  running = true; prevT = 0; schedule();
+}
+// Analyse each new video frame once the previous analysis is done (requestVideoFrameCallback
+// where available), so the overlay is never more than one frame behind.
+function schedule() {
+  if (!running) return;
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(loop);
+  else requestAnimationFrame(loop);
+}
+function loop() {
+  if (!running) return;
+  if (performance.now() - prevT >= MIN_INTERVAL_MS) tick();
+  schedule();
 }
 function stop() {
-  clearInterval(timer); timer = null;
+  running = false;
   if (stream) stream.getTracks().forEach(t => t.stop());
   stream = track = imageCapture = null;
 }
@@ -248,8 +262,10 @@ function tick() {
   const gray = A.lumaFromRGBA(sctx.getImageData(0, 0, W, H).data, W * H);
   const r = A.analyzeFrame(gray, W, H, prevGray);
   r.ms = performance.now() - t0; r.W = W; r.H = H;
-  prevGray = gray;
   const now = performance.now();
+  if (r.motion != null && prevT) r.motion *= 150 / Math.max(30, now - prevT);   // per 150 ms, the scale the thresholds were set for
+  r.interval = prevT ? now - prevT : null;
+  prevGray = gray; prevT = now;
   sharpHist.push({ t: now, v: r.sharpness });
   sharpHist = sharpHist.filter(s => now - s.t < 3000);
   r.sharpRef = Math.max(...sharpHist.map(s => s.v));
@@ -311,12 +327,13 @@ function render(s, now) {
     if (!greenSince) greenSince = now;
     const ready = now - greenSince >= T.steadyMs;
     hint.className = "hint ok";
-    hint.innerHTML = ready ? (autoOn ? "Passt – Foto wird aufgenommen" : "Passt – jetzt auslösen") : "Fast – ruhig halten";
-    if (s.top && s.top.soft) hint.innerHTML += `<small>${s.top.hint}</small>`;
+    $("hintMain").textContent = ready ? (autoOn ? "Passt – Foto wird aufgenommen" : "Passt – jetzt auslösen") : "Fast – ruhig halten";
+    $("hintSub").textContent = s.top && s.top.soft ? s.top.hint : "";
   } else {
     greenSince = 0;
     hint.className = "hint " + s.top.level;
-    hint.innerHTML = s.top.hint + (s.top.sub ? `<small>${s.top.sub}</small>` : "");
+    $("hintMain").textContent = s.top.hint;
+    $("hintSub").textContent = s.top.sub || "";
   }
   const ready = s.good && now - greenSince >= T.steadyMs;
   $("shutter").classList.toggle("ready", ready);
@@ -334,7 +351,7 @@ function render(s, now) {
     const r = s.r, f = v => v == null ? "–" : v.toFixed(1);
     $("debug").textContent =
       `Stream ${video.videoWidth}×${video.videoHeight}\n` +
-      `Analyse ${r.W}×${r.H} in ${r.ms.toFixed(0)} ms\n` +
+      `Analyse ${r.W}×${r.H} in ${r.ms.toFixed(0)} ms, alle ${f(r.interval)} ms\n` +
       `Schärfe ${r.sharpness.toFixed(0)} / max ${r.sharpRef.toFixed(0)}\n` +
       `Bewegung ${f(r.motion)}\n` +
       `hell ${f(r.clippedPct)} %  dunkel ${f(r.darkPct)} %\n` +

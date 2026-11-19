@@ -45,56 +45,71 @@
 
   // Hough transform restricted to near-horizontal lines.
   // A line at angle phi (degrees, positive = falling to the right on screen, y down) through
-  // (x, y) has offset c = y*cos(phi) - x*sin(phi). Edge pixels vote with their gradient strength.
+  // (x, y) has offset c = y*cos(phi) - x*sin(phi). Each edge pixel votes only for angles within
+  // VOTE_WINDOW_DEG of its own edge direction (from the Sobel gradient), which keeps it cheap.
+  const VOTE_WINDOW_DEG = 20;     // = whole search range; narrower windows lost shelf edges in the test
+  let buf = null;                       // reused between frames
+  function buffers(n, nAcc) {
+    if (!buf || buf.n < n || buf.nAcc !== nAcc) {
+      buf = { n, nAcc, mag: new Float32Array(n), x: new Int16Array(n), y: new Int16Array(n),
+              k: new Int16Array(n), acc: new Float32Array(nAcc), hist: new Uint32Array(1024) };
+    }
+    return buf;
+  }
   function shelfLines(g, W, H) {
     const nA = Math.round(2 * MAX_LINE_DEG / STEP_DEG) + 1;
-    const angles = [], cosA = [], sinA = [];
+    const angles = new Float32Array(nA), cosA = new Float32Array(nA), sinA = new Float32Array(nA);
     for (let k = 0; k < nA; k++) {
-      const a = -MAX_LINE_DEG + k * STEP_DEG; angles.push(a);
-      cosA.push(Math.cos(a * Math.PI / 180)); sinA.push(Math.sin(a * Math.PI / 180));
+      const a = -MAX_LINE_DEG + k * STEP_DEG; angles[k] = a;
+      cosA[k] = Math.cos(a * Math.PI / 180); sinA[k] = Math.sin(a * Math.PI / 180);
     }
+    const cMax = Math.ceil(Math.hypot(W, H)), cOff = cMax, nC = 2 * cMax + 1;
+    const b = buffers(W * H, nA * nC), mag = b.mag, X = b.x, Y = b.y, K = b.k, hist = b.hist;
+    hist.fill(0);
     // Sobel, keep pixels whose gradient points mostly vertically (= edge runs horizontally).
-    const mags = [], pts = [];
+    let n = 0;
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
       const i = y * W + x;
       const gx = (g[i - W + 1] + 2 * g[i + 1] + g[i + W + 1]) - (g[i - W - 1] + 2 * g[i - 1] + g[i + W - 1]);
       const gy = (g[i + W - 1] + 2 * g[i + W] + g[i + W + 1]) - (g[i - W - 1] + 2 * g[i - W] + g[i - W + 1]);
-      const ax = Math.abs(gx), ay = Math.abs(gy);
-      if (ay > 2.2 * ax && ay > 40) { mags.push(ay); pts.push(x, y); }
-    }
-    if (pts.length < W) return [];
-    // Keep the strongest 40 % of candidate edge pixels: shelf edges are high-contrast.
-    const sorted = Float32Array.from(mags).sort();
-    const thr = sorted[Math.floor(sorted.length * 0.6)];
-    const cMax = Math.ceil(Math.hypot(W, H)), cOff = cMax, nC = 2 * cMax + 1;
-    const acc = new Float32Array(nA * nC);
-    for (let p = 0, q = 0; p < mags.length; p++, q += 2) {
-      if (mags[p] < thr) continue;
-      const x = pts[q], y = pts[q + 1];
-      for (let k = 0; k < nA; k++) {
-        const c = Math.round(y * cosA[k] - x * sinA[k]) + cOff;
-        acc[k * nC + c] += 1;
+      const ax = gx < 0 ? -gx : gx, ay = gy < 0 ? -gy : gy;
+      if (ay > 2.2 * ax && ay > 40) {
+        mag[n] = ay; X[n] = x; Y[n] = y;
+        // edge direction: tangent (1, tan phi) is perpendicular to (gx, gy) -> tan phi = -gx / gy
+        K[n] = Math.round((Math.atan(-gx / gy) * 57.29578 + MAX_LINE_DEG) / STEP_DEG);
+        hist[ay > 1023 ? 1023 : ay | 0]++;
+        n++;
       }
+    }
+    if (n < W) return [];
+    // Keep the strongest 40 % of candidate edge pixels: shelf edges are high-contrast.
+    let thr = 1023;
+    for (let cum = 0; thr > 0; thr--) { cum += hist[thr]; if (cum >= 0.4 * n) break; }
+    const acc = b.acc; acc.fill(0);
+    const win = Math.round(VOTE_WINDOW_DEG / STEP_DEG);
+    for (let p = 0; p < n; p++) {
+      if (mag[p] < thr) continue;
+      const x = X[p], y = Y[p], k0 = K[p];
+      const lo = k0 - win < 0 ? 0 : k0 - win, hi = k0 + win > nA - 1 ? nA - 1 : k0 + win;
+      for (let k = lo; k <= hi; k++) acc[k * nC + Math.round(y * cosA[k] - x * sinA[k]) + cOff] += 1;
     }
     // Peaks: one vote per pixel, so a peak's value is the number of edge pixels on the line.
-    // A shelf edge has to cover at least 45 % of the width.
-    const minVotes = 0.45 * W, lines = [];
-    const used = new Uint8Array(nA * nC);
-    for (;;) {
-      let best = -1, bv = minVotes;
-      for (let i = 0; i < acc.length; i++) if (!used[i] && acc[i] > bv) { bv = acc[i]; best = i; }
-      if (best < 0 || lines.length >= 12) break;
-      const k = Math.floor(best / nC), c = (best % nC) - cOff;
-      // suppress neighbours: +-6 px offset, +-4 degrees
-      for (let dk = -8; dk <= 8; dk++) for (let dc = -6; dc <= 6; dc++) {
-        const kk = k + dk, cc = c + cOff + dc;
-        if (kk >= 0 && kk < nA && cc >= 0 && cc < nC) used[kk * nC + cc] = 1;
-      }
+    // A shelf edge has to cover at least 45 % of the width. Greedy pick, strongest first,
+    // skipping candidates within +-6 px offset and +-4 degrees of an accepted line.
+    const minVotes = 0.45 * W, cand = [];
+    for (let i = 0; i < acc.length; i++) if (acc[i] > minVotes) cand.push(i);
+    cand.sort((a, c) => acc[c] - acc[a]);
+    const picked = [], lines = [];
+    for (const i of cand) {
+      if (picked.length >= 12) break;
+      const k = Math.floor(i / nC), c = (i % nC) - cOff;
+      if (picked.some(q => Math.abs(q.k - k) <= 8 && Math.abs(q.c - c) <= 6)) continue;
+      picked.push({ k, c });
       const a = angles[k];
       // y of the line at the horizontal centre of the frame
       const yMid = (c + (W / 2) * sinA[k]) / cosA[k];
       if (yMid < 2 || yMid > H - 3) continue;
-      lines.push({ angleDeg: a, yMid, votes: bv, coverage: bv / W });
+      lines.push({ angleDeg: a, yMid, votes: acc[i], coverage: acc[i] / W });
     }
     return lines.sort((p, q) => p.yMid - q.yMid);
   }
@@ -119,9 +134,22 @@
     return { rollDeg: roll, skewDeg: num / den };
   }
 
+  function halfSize(g, W, H) {
+    const w = W >> 1, h = H >> 1, o = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = 2 * y * W + 2 * x;
+      o[y * w + x] = 0.25 * (g[i] + g[i + 1] + g[i + W] + g[i + W + 1]);
+    }
+    return { g: o, W: w, H: h };
+  }
+
   function analyzeFrame(gray, W, H, prevGray) {
     const ex = exposure(gray);
-    const lines = shelfLines(gray, W, H);
+    // Shelf edges are long, coarse structures: find them on a half-size frame (a quarter of the
+    // pixels), then scale back to the analysis frame.
+    const half = halfSize(gray, W, H);
+    const lines = shelfLines(half.g, half.W, half.H).map(l =>
+      ({ angleDeg: l.angleDeg, yMid: l.yMid * H / half.H, votes: l.votes, coverage: l.coverage }));
     const rs = rollAndSkew(lines, H);
     return {
       sharpness: laplacianVariance(gray, W, H),
